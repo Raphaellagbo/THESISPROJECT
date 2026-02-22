@@ -1,0 +1,64 @@
+{
+  "metadata": {
+    "project": "IoT & ML Arabica Coffee Quality Control",
+    "authors": [
+      "Canillas, John Ryan E.",
+      "Lagbo, Raphael F.",
+      "Villarosa, Harvi L."
+    ],
+    "institution": "Cavite State University - Imus Campus",
+    "year": 2026,
+    "model_type": "Random Forest Classifier",
+    "data_source": "Hybrid (Synthetic + Real Pilot)",
+    "generated": "2026-02-20 01:52:21",
+    "citations": {
+      "drying_temp": "Sandeep et al. (2021); Costa et al. (2025)",
+      "drying_humidity": "Liu et al. (2020)",
+      "drying_moisture": "Coelho et al. (2024); Escobar et al. (2020)",
+      "roasting_range": "Moeenfard & Silva (2022); SCA Standards"
+    }
+  },
+  "drying": {
+    "threshold_temp_max": 40.0,
+    "threshold_humi_max": 65.0,
+    "threshold_moisture_ferment": 12.0,
+    "threshold_optimal_target": 12.0,
+    "threshold_over_dried": 10.0,
+    "moisture_initial_range": [
+      30.0,
+      65.0
+    ],
+    "moisture_final_range": [
+      10.0,
+      12.0
+    ],
+    "model_accuracy": 100.0,
+    "feature_importance": {
+      "temperature": 0.4054,
+      "humidity": 0.4631,
+      "moisture": 0.1315
+    },
+    "avg_split_thresholds": {
+      "temperature": 36.5165,
+      "humidity": 56.8952,
+      "moisture": 20.5884
+    },
+    "n_estimators": 100,
+    "max_depth": 8,
+    "training_samples": 960,
+    "test_samples": 240
+  },
+  "roasting": {
+    "threshold_optimal_min": 196.0,
+    "threshold_optimal_max": 224.0,
+    "threshold_burnt": 225.0,
+    "model_accuracy": 100.0,
+    "avg_split_thresholds": {
+      "roast_temperature": 224.3573
+    },
+    "n_estimators": 100,
+    "max_depth": 6,
+    "training_samples": 640,
+    "test_samples": 160
+  }
+}

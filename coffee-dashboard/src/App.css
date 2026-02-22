@@ -1,0 +1,41 @@
+#root {
+  width: 100%;
+  min-height: 100vh;
+}
+
+/* Responsive container for the main content */
+@media (max-width: 640px) {
+  body {
+    font-size: 14px;
+  }
+}
+
+@media (min-width: 1536px) {
+  #root {
+    max-width: 1536px;
+    margin: 0 auto;
+  }
+}
+
+/* Smooth scrolling for better mobile UX */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Ensure touch targets are at least 44x44px on mobile */
+@media (max-width: 768px) {
+
+  button,
+  input[type="button"],
+  input[type="submit"] {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+/* Improve readability on small screens */
+@media (max-width: 480px) {
+  body {
+    overflow-x: hidden;
+  }
+}
