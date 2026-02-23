@@ -393,7 +393,7 @@ export default function CoffeeMonitoringDashboard() {
         if (precip > 0) alerts.push({ title: "🌧️ Rain Detected", body: `${location.name}: ${precip}mm rain — Move beans indoors or cover immediately.`, type: "critical" });
         if (code >= 80) alerts.push({ title: "⛈️ Storm Warning", body: `${location.name}: Severe weather — Do not begin a new drying cycle.`, type: "critical" });
         alerts.forEach(a => sendWeatherAlert(a.title, a.body, a.type));
-        if (alerts.length === 0) addToast(`✅ ${location.name}: Conditions favorable for drying.`, "success");
+        if (alerts.length === 0) addToast(`${location.name}: Conditions favorable for drying.`, "success");
         setLastCheckedWeather(new Date().toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit" }));
     };
 

@@ -1,6 +1,5 @@
-// Coffee Dashboard PWA Service Worker
-const CACHE_NAME = 'coffee-dashboard-v1';
-const STATIC_CACHE = 'coffee-static-v1';
+const CACHE_NAME = 'coffee-dashboard-v2';
+const STATIC_CACHE = 'coffee-static-v2';
 
 // Assets to cache for offline use
 const STATIC_ASSETS = [
@@ -8,6 +7,13 @@ const STATIC_ASSETS = [
   '/index.html',
   '/manifest.json',
 ];
+
+// Listen for skip waiting message
+self.addEventListener('message', (event) => {
+  if (event.data?.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
+});
 
 // Install event - cache static assets
 self.addEventListener('install', (event) => {
