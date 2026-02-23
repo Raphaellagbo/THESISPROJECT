@@ -34,16 +34,15 @@ import {
 } from "recharts";
 
 import { database } from "../firebase";
-import { ref, onValue } from "firebase/database";
+import { ref, onValue, set } from "firebase/database";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card.jsx";
 import { Button } from "./ui/button.jsx";
-import mlModel from './coffee_model_weights.json'; // <--- ITO ANG "AI BRAIN"
+import mlModel from './coffee_model_weights.json';
 
 // ==========================================================
 // 1. SENSOR FUSION LOGIC
 // ==========================================================
 const getEffectiveReadings = (s1, s2) => {
-    // Check validity
     const s1Valid = s1 && s1.temp > 0;
     const s2Valid = s2 && s2.temp > 0;
 
@@ -52,11 +51,9 @@ const getEffectiveReadings = (s1, s2) => {
     let status = "NORMAL";
 
     if (s1Valid && s2Valid) {
-        // Check difference
         if (Math.abs(s1.temp - s2.temp) > 3.0) {
             status = "DISCREPANCY";
         }
-        // Average
         finalTemp = (s1.temp + s2.temp) / 2;
         finalHumi = (s1.humi + s2.humi) / 2;
     } else if (s1Valid) {
@@ -75,13 +72,11 @@ const getEffectiveReadings = (s1, s2) => {
 };
 
 // ==========================================================
-// 2. AI LOGIC (UPDATED: Now returns ACTION + STATUS)
+// 2. AI LOGIC
 // ==========================================================
 const analyzeCoffeeQuality = (stage, temp, humidity, weight, moisture, currentThresholds = null) => {
 
-    // --- DRYING STAGE ---
     if (stage === "Drying") {
-        // Use live Settings thresholds if provided, otherwise fall back to JSON
         const rules = {
             threshold_temp_max: currentThresholds?.dry_max_temp ?? mlModel.drying.threshold_temp_max,
             threshold_humi_max: currentThresholds?.dry_max_humi ?? mlModel.drying.threshold_humi_max,
@@ -90,7 +85,6 @@ const analyzeCoffeeQuality = (stage, temp, humidity, weight, moisture, currentTh
             threshold_over_dried: mlModel.drying.threshold_over_dried,
         };
 
-        // 1. EMPTY CHECK
         if (weight < 0.1) {
             return {
                 message: "WAITING FOR BEANS... (Load Cell Empty)",
@@ -99,7 +93,6 @@ const analyzeCoffeeQuality = (stage, temp, humidity, weight, moisture, currentTh
             };
         }
 
-        // 2. OVER-DRIED CHECK (Uses Moisture % from JSON)
         if (moisture > 0 && moisture < rules.threshold_over_dried) {
             return {
                 message: `CRITICAL: OVER-DRIED! (${moisture.toFixed(1)}% MC)`,
@@ -108,7 +101,6 @@ const analyzeCoffeeQuality = (stage, temp, humidity, weight, moisture, currentTh
             };
         }
 
-        // 3. FERMENTATION CHECK (Heat + High Moisture)
         if (temp > rules.threshold_temp_max && moisture > rules.threshold_moisture_ferment) {
             return {
                 message: "CRITICAL: FERMENTATION RISK (Hot & Wet)",
@@ -117,7 +109,6 @@ const analyzeCoffeeQuality = (stage, temp, humidity, weight, moisture, currentTh
             };
         }
 
-        // 4. HUMIDITY CHECK
         if (humidity > rules.threshold_humi_max) {
             return {
                 message: `WARNING: TOO HUMID (${humidity.toFixed(1)}%)`,
@@ -126,7 +117,6 @@ const analyzeCoffeeQuality = (stage, temp, humidity, weight, moisture, currentTh
             };
         }
 
-        // 5. TARGET REACHED (Success)
         if (moisture > 0 && moisture <= rules.threshold_optimal_target) {
             return {
                 message: `OPTIMAL: DRYING COMPLETE (${moisture.toFixed(1)}% MC)`,
@@ -135,7 +125,6 @@ const analyzeCoffeeQuality = (stage, temp, humidity, weight, moisture, currentTh
             };
         }
 
-        // 6. IN PROGRESS
         return {
             message: `OPTIMAL: DRYING IN PROGRESS (${moisture.toFixed(1)}% MC)`,
             action: "Maintain current conditions. Monitor periodically.",
@@ -143,9 +132,7 @@ const analyzeCoffeeQuality = (stage, temp, humidity, weight, moisture, currentTh
         };
     }
 
-    // --- ROASTING STAGE ---
     else if (stage === "Roasting") {
-        // Use live Settings thresholds if provided, otherwise fall back to JSON
         const rules = {
             threshold_burnt: mlModel.roasting.threshold_burnt,
             threshold_optimal_min: currentThresholds?.roast_min_temp ?? mlModel.roasting.threshold_optimal_min,
@@ -190,13 +177,13 @@ export default function CoffeeMonitoringDashboard() {
     const [stage, setStage] = useState("Drying");
     const [showSettings, setShowSettings] = useState(false);
 
-    // --- THRESHOLDS (Aligned with AI Model & Thesis) ---
+    // --- THRESHOLDS ---
     const [thresholds, setThresholds] = useState({
-        dry_max_temp: 40.0,      // Max 40°C — prevents cell membrane damage & over-fermentation
-        dry_max_humi: 65.0,      // Below 65% RH — inhibits mold growth during drying
-        dry_target_weight: 12.0, // Final Moisture Target: 10–12% MC (Thesis Page 11)
-        roast_max_temp: 224.0,   // Max 224°C — upper bound of Medium-Dark Roast range
-        roast_min_temp: 196.0    // Min 196°C — First Crack / start of optimal roast window
+        dry_max_temp: 40.0,
+        dry_max_humi: 65.0,
+        dry_target_weight: 12.0,
+        roast_max_temp: 224.0,
+        roast_min_temp: 196.0
     });
 
     const handleThresholdChange = (e) => {
@@ -204,7 +191,7 @@ export default function CoffeeMonitoringDashboard() {
         setThresholds(prev => ({ ...prev, [name]: parseFloat(value) }));
     };
 
-    // --- STATE VARIABLES ---
+    // --- SENSOR STATE ---
     const [liveData, setLiveData] = useState({
         sensorLeft: { temp: 0, humi: 0 },
         sensorRight: { temp: 0, humi: 0 },
@@ -215,6 +202,7 @@ export default function CoffeeMonitoringDashboard() {
     const [dryingGraphData, setDryingGraphData] = useState([]);
     const [roastingGraphData, setRoastingGraphData] = useState([]);
 
+    // --- WEATHER STATE ---
     const [showWeather, setShowWeather] = useState(false);
     const [weatherData, setWeatherData] = useState(null);
     const [weatherLoading, setWeatherLoading] = useState(false);
@@ -226,12 +214,55 @@ export default function CoffeeMonitoringDashboard() {
     const [notifPermission, setNotifPermission] = useState(
         typeof Notification !== "undefined" ? Notification.permission : "default"
     );
-    const [toasts, setToasts] = useState([]);          // in-app toast queue
+    const [toasts, setToasts] = useState([]);
     const [autoRefresh, setAutoRefresh] = useState(false);
     const [lastCheckedWeather, setLastCheckedWeather] = useState(null);
     const weatherRefreshRef = React.useRef(null);
-    const prevAiAlertRef = React.useRef({ message: "", type: "" }); // tracks last fired AI alert
+    const prevAiAlertRef = React.useRef({ message: "", type: "" });
 
+    // --- SETTINGS LOADED FLAG (prevents overwriting Firebase before data loads) ---
+    const [settingsLoaded, setSettingsLoaded] = useState(false);
+
+    // ==========================================================
+    // FIREBASE: LOAD SETTINGS ON STARTUP
+    // ==========================================================
+    useEffect(() => {
+        const settingsRef = ref(database, '/settings');
+        const unsubscribe = onValue(settingsRef, (snapshot) => {
+            const data = snapshot.val();
+            if (data) {
+                setNotificationsEnabled(data.notificationsEnabled ?? false);
+                setShowWeather(data.showWeather ?? false);
+                setAutoRefresh(data.autoRefresh ?? false);
+            }
+            // Mark as loaded whether data exists or not
+            setSettingsLoaded(true);
+        });
+        return () => unsubscribe();
+    }, []);
+
+    // ==========================================================
+    // FIREBASE: SAVE SETTINGS WHEN TOGGLED
+    // (guarded by settingsLoaded to avoid overwriting on mount)
+    // ==========================================================
+    useEffect(() => {
+        if (!settingsLoaded) return;
+        set(ref(database, '/settings/notificationsEnabled'), notificationsEnabled);
+    }, [notificationsEnabled, settingsLoaded]);
+
+    useEffect(() => {
+        if (!settingsLoaded) return;
+        set(ref(database, '/settings/showWeather'), showWeather);
+    }, [showWeather, settingsLoaded]);
+
+    useEffect(() => {
+        if (!settingsLoaded) return;
+        set(ref(database, '/settings/autoRefresh'), autoRefresh);
+    }, [autoRefresh, settingsLoaded]);
+
+    // ==========================================================
+    // LOCATIONS
+    // ==========================================================
     const PH_LOCATIONS = [
         { name: "Amadeo, Cavite", lat: 14.1736, lon: 120.9189 },
         { name: "Imus, Cavite", lat: 14.4297, lon: 120.9367 },
@@ -290,7 +321,6 @@ export default function CoffeeMonitoringDashboard() {
         return { label: "Favorable for Drying", color: "text-green-600", note: "Ambient conditions support optimal drying. Proceed normally." };
     };
 
-
     // --- TOAST HELPERS ---
     const addToast = (message, type = "info") => {
         const id = Date.now();
@@ -325,7 +355,7 @@ export default function CoffeeMonitoringDashboard() {
             }
         } else {
             setNotificationsEnabled(false);
-            prevAiAlertRef.current = { message: "", type: "" }; // reset dedup on disable
+            prevAiAlertRef.current = { message: "", type: "" };
             addToast("All system notifications disabled.", "info");
         }
     };
@@ -336,21 +366,20 @@ export default function CoffeeMonitoringDashboard() {
         if (notificationsEnabled && notifPermission === "granted") {
             try {
                 new Notification(title, { body, tag: "coffee-weather-alert" });
-            } catch (e) { /* silently fail if blocked */ }
+            } catch (e) { }
         }
     };
 
-    // --- SEND SENSOR / AI ALERT (deduped — only fires when message changes) ---
     const sendSensorAlert = (title, body, type = "warning", tag = "coffee-sensor-alert") => {
         addToast(`${title}: ${body}`, type);
         if (notificationsEnabled && notifPermission === "granted") {
             try {
                 new Notification(title, { body, tag });
-            } catch (e) { /* silently fail */ }
+            } catch (e) { }
         }
     };
 
-    // --- EVALUATE WEATHER AND FIRE ALERTS IF NEEDED ---
+    // --- EVALUATE WEATHER ALERTS ---
     const evaluateWeatherAlerts = (json, location) => {
         const c = json.current;
         const humidity = c.relative_humidity_2m;
@@ -368,7 +397,7 @@ export default function CoffeeMonitoringDashboard() {
         setLastCheckedWeather(new Date().toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit" }));
     };
 
-    // --- AUTO-REFRESH EFFECT (every 10 minutes when enabled) ---
+    // --- AUTO-REFRESH EFFECT ---
     useEffect(() => {
         if (autoRefresh && selectedLocation) {
             weatherRefreshRef.current = setInterval(async () => {
@@ -379,12 +408,13 @@ export default function CoffeeMonitoringDashboard() {
                     const json = await res.json();
                     setWeatherData(json);
                     evaluateWeatherAlerts(json, selectedLocation);
-                } catch (e) { /* silent */ }
+                } catch (e) { }
             }, 10 * 60 * 1000);
         }
         return () => clearInterval(weatherRefreshRef.current);
     }, [autoRefresh, selectedLocation, notificationsEnabled]);
 
+    // --- FIREBASE SENSOR DATA LISTENER ---
     useEffect(() => {
         const sensorsRef = ref(database, '/');
         const unsubscribe = onValue(sensorsRef, (snapshot) => {
@@ -422,8 +452,6 @@ export default function CoffeeMonitoringDashboard() {
                     setRoastingGraphData(prev => [...prev, { timestamp, temperature: roastTemp }].slice(-20));
                 }
 
-                // --- EVALUATE SENSOR-BASED AI ALERTS ---
-                // Compute the AI result from fresh sensor data and fire notification if it changed
                 setStage(currentStage => {
                     setThresholds(currentThresholds => {
                         let aiResult;
@@ -435,7 +463,6 @@ export default function CoffeeMonitoringDashboard() {
                             const { finalTemp, finalHumi, status } = getEffectiveReadings(s1, s2);
                             aiResult = analyzeCoffeeQuality(currentStage, finalTemp, finalHumi, dryWeight, dryMoisture, currentThresholds);
 
-                            // Sensor hardware alerts (discrepancy / failure)
                             if (status === "DISCREPANCY" && prevAiAlertRef.current.message !== "DISCREPANCY") {
                                 sendSensorAlert("⚠️ Sensor Mismatch", "Left/Right sensors differ >3°C. Readings averaged. Check sensor placement.", "warning", "sensor-discrepancy");
                                 prevAiAlertRef.current = { message: "DISCREPANCY", type: "warning" };
@@ -446,7 +473,6 @@ export default function CoffeeMonitoringDashboard() {
                             }
                         }
 
-                        // Only fire if the AI message has meaningfully changed AND it's not a neutral/info state
                         const prev = prevAiAlertRef.current;
                         if (aiResult.message !== prev.message && aiResult.type !== "neutral") {
                             const notifMap = {
@@ -460,9 +486,9 @@ export default function CoffeeMonitoringDashboard() {
                             prevAiAlertRef.current = { message: aiResult.message, type: aiResult.type };
                         }
 
-                        return currentThresholds; // no change, just reading
+                        return currentThresholds;
                     });
-                    return currentStage; // no change, just reading
+                    return currentStage;
                 });
             }
         });
@@ -476,7 +502,7 @@ export default function CoffeeMonitoringDashboard() {
         } catch (e) { return ""; }
     };
 
-    // --- HELPER COMPONENT (UPDATED UI) ---
+    // --- SENSOR STATUS ALERT COMPONENT ---
     const SensorStatusAlert = ({ s1Data, s2Data, roastData, weightValue, moistureValue, currentStage, currentThresholds, outdoorWeather }) => {
 
         let aiResult = { message: "Loading...", action: "Wait...", type: "neutral" };
@@ -484,7 +510,6 @@ export default function CoffeeMonitoringDashboard() {
         let displayHumi = 0;
         let status = "NORMAL";
 
-        // Logic Selection
         if (currentStage === "Roasting") {
             aiResult = analyzeCoffeeQuality(currentStage, roastData.temp, 0, 0, 0, currentThresholds);
             displayTemp = roastData.temp;
@@ -496,7 +521,6 @@ export default function CoffeeMonitoringDashboard() {
             aiResult = analyzeCoffeeQuality(currentStage, displayTemp, displayHumi, weightValue, moistureValue, currentThresholds);
         }
 
-        // --- WEATHER RISK FACTORS (for Drying stage only) ---
         const weatherRisks = [];
         if (outdoorWeather && currentStage === "Drying") {
             const c = outdoorWeather.current;
@@ -519,7 +543,6 @@ export default function CoffeeMonitoringDashboard() {
             if (code >= 80) {
                 weatherRisks.push({ level: "critical", text: `Severe weather event in progress — suspend outdoor drying immediately.` });
             }
-            // Compound risk escalation: if outdoor + sensor both bad, escalate AI result
             if (outHumi > 65 && displayHumi > (currentThresholds?.dry_max_humi ?? 65) && aiResult.type !== "critical") {
                 aiResult = {
                     ...aiResult,
@@ -530,7 +553,6 @@ export default function CoffeeMonitoringDashboard() {
             }
         }
 
-        // Color Mapping
         let colorClass = "bg-gray-100 text-gray-900 border-gray-200";
         let Icon = Info;
 
@@ -557,7 +579,6 @@ export default function CoffeeMonitoringDashboard() {
 
         return (
             <div className="space-y-3 sm:space-y-4">
-                {/* Hardware Status Warnings */}
                 {status === "DISCREPANCY" && (
                     <div className="p-2 sm:p-3 bg-yellow-100 text-yellow-800 text-xs sm:text-sm rounded border border-yellow-200 flex items-start sm:items-center gap-2">
                         <Activity size={14} className="shrink-0 mt-0.5 sm:mt-0" /> <span><b>Sensor Mismatch:</b> Left/Right sensors differ {'>'} 3°. Using average.</span>
@@ -569,13 +590,11 @@ export default function CoffeeMonitoringDashboard() {
                     </div>
                 )}
 
-                {/* AI Box */}
                 <div className={`p-3 sm:p-4 rounded-lg border-2 shadow-sm ${colorClass}`}>
                     <div className="flex items-center gap-2 font-bold text-base sm:text-lg mb-2 sm:mb-1">
                         <Icon size={20} className="shrink-0" /> <span>AI Decision Engine</span>
                     </div>
 
-                    {/* Live Stats */}
                     <div className="text-xs sm:text-sm opacity-90 mb-3 pl-4 sm:pl-8 break-words">
                         {currentStage === "Roasting" ? (
                             <span>Current Temp: <b>{displayTemp}°C</b></span>
@@ -587,12 +606,10 @@ export default function CoffeeMonitoringDashboard() {
                         )}
                     </div>
 
-                    {/* Analysis Message */}
                     <div className="text-sm sm:text-base font-bold pl-4 sm:pl-8 break-words">
                         {aiResult.message}
                     </div>
 
-                    {/* RECOMMENDATION ACTION */}
                     <div className="mt-3 pt-3 border-t border-black/10 flex items-start gap-2 sm:gap-3 pl-1">
                         <div className="bg-white/50 p-1 sm:p-1.5 rounded-full shrink-0"><Lightbulb size={16} className="sm:w-[18px] sm:h-[18px]" /></div>
                         <div className="min-w-0">
@@ -602,7 +619,6 @@ export default function CoffeeMonitoringDashboard() {
                     </div>
                 </div>
 
-                {/* WEATHER RISK FACTORS BLOCK */}
                 {weatherRisks.length > 0 && (
                     <div className="rounded-lg border-2 border-sky-300 bg-sky-50 overflow-hidden">
                         <div className="px-3 sm:px-4 py-2 bg-sky-600 text-white flex items-center gap-1 sm:gap-2 flex-wrap">
@@ -622,7 +638,6 @@ export default function CoffeeMonitoringDashboard() {
                     </div>
                 )}
 
-                {/* No weather loaded prompt */}
                 {!outdoorWeather && currentStage === "Drying" && (
                     <div className="text-xs text-gray-400 flex items-start gap-2 pl-1 pt-1">
                         <Cloud size={12} className="mt-0.5 shrink-0" /> <span className="break-words">No outdoor weather data loaded — open Weather panel and select a location to factor ambient conditions into this analysis.</span>
@@ -640,7 +655,8 @@ export default function CoffeeMonitoringDashboard() {
 
     return (
         <div className="min-h-screen bg-gradient-to-br from-amber-50 to-orange-100 p-4 sm:p-6 md:p-8">
-            {/* ======================= TOAST NOTIFICATIONS ======================= */}
+
+            {/* TOAST NOTIFICATIONS */}
             <div className="fixed top-2 left-2 right-2 sm:top-4 sm:right-4 sm:left-auto z-50 flex flex-col gap-2 w-auto sm:w-80">
                 {toasts.map(toast => (
                     <div
@@ -657,6 +673,7 @@ export default function CoffeeMonitoringDashboard() {
                 ))}
             </div>
 
+            {/* HEADER */}
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
                 <h1 className="text-2xl sm:text-3xl font-bold text-gray-800">IoT & ML Coffee Quality Control</h1>
                 <div className="flex items-center gap-2 flex-wrap">
@@ -664,7 +681,7 @@ export default function CoffeeMonitoringDashboard() {
                         onClick={toggleNotifications}
                         className={`flex items-center gap-2 border shadow-sm transition-colors ${notificationsEnabled ? "bg-amber-100 border-amber-400 text-amber-700 hover:bg-amber-200" : "bg-white hover:bg-gray-50 text-gray-600"}`}
                         variant="outline"
-                        title={notificationsEnabled ? "Disable weather notifications" : "Enable weather notifications"}
+                        title={notificationsEnabled ? "Disable notifications" : "Enable notifications"}
                     >
                         {notificationsEnabled ? <BellRing size={18} className="text-amber-500" /> : <BellOff size={18} />}
                         <span className="hidden sm:inline">{notificationsEnabled ? "Alerts On" : "Alerts Off"}</span>
@@ -743,7 +760,6 @@ export default function CoffeeMonitoringDashboard() {
                         </CardTitle>
                     </CardHeader>
                     <CardContent className="pt-5 pb-5 bg-sky-50">
-                        {/* Location selector */}
                         <div className="mb-5">
                             <p className="text-xs font-semibold text-sky-700 uppercase tracking-wide mb-2 flex items-center gap-1">
                                 <MapPin size={13} /> Select a location to check ambient conditions
@@ -764,7 +780,6 @@ export default function CoffeeMonitoringDashboard() {
                             </div>
                         </div>
 
-                        {/* Loading */}
                         {weatherLoading && (
                             <div className="flex items-center justify-center gap-3 py-8 text-sky-600">
                                 <Loader2 size={22} className="animate-spin" />
@@ -772,14 +787,12 @@ export default function CoffeeMonitoringDashboard() {
                             </div>
                         )}
 
-                        {/* Error */}
                         {weatherError && (
                             <div className="p-3 bg-red-100 border border-red-300 rounded-lg text-red-700 text-sm flex items-center gap-2">
                                 <AlertTriangle size={16} /> {weatherError}
                             </div>
                         )}
 
-                        {/* Weather display */}
                         {weatherData && !weatherLoading && (() => {
                             const c = weatherData.current;
                             const temp = c.temperature_2m;
@@ -791,7 +804,6 @@ export default function CoffeeMonitoringDashboard() {
 
                             return (
                                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                                    {/* Main weather card */}
                                     <div className="sm:col-span-1 bg-gradient-to-br from-sky-400 to-blue-500 text-white rounded-xl p-4 flex flex-col items-center justify-center text-center shadow">
                                         {getWeatherIcon(code)}
                                         <p className="text-3xl font-bold mt-2">{temp}°C</p>
@@ -799,7 +811,6 @@ export default function CoffeeMonitoringDashboard() {
                                         <p className="text-xs opacity-75 mt-1 flex items-center gap-1"><MapPin size={11} />{selectedLocation.name}</p>
                                     </div>
 
-                                    {/* Detail stats */}
                                     <div className="sm:col-span-1 grid grid-cols-2 gap-2 sm:gap-3">
                                         <div className="bg-white rounded-xl p-2 sm:p-3 shadow-sm border border-sky-100 flex flex-col items-center justify-center text-center">
                                             <Droplets size={18} className="text-blue-400 mb-1" />
@@ -823,7 +834,6 @@ export default function CoffeeMonitoringDashboard() {
                                         </div>
                                     </div>
 
-                                    {/* Drying impact */}
                                     <div className="sm:col-span-1 bg-white rounded-xl p-3 sm:p-4 shadow-sm border border-sky-100 flex flex-col justify-between">
                                         <div>
                                             <p className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2 flex items-center gap-1">
@@ -852,120 +862,112 @@ export default function CoffeeMonitoringDashboard() {
                 </Card>
             )}
 
+            {/* STAGE SELECTION */}
+            <div className="flex gap-2 sm:gap-4 mb-6 flex-wrap">
+                <Button variant={stage === "Drying" ? "default" : "outline"} onClick={() => setStage("Drying")} className="flex-1 sm:flex-none">Drying Stage</Button>
+                <Button variant={stage === "Roasting" ? "default" : "outline"} onClick={() => setStage("Roasting")} className="flex-1 sm:flex-none">Roasting Stage</Button>
+            </div>
 
-            <>
-                {/* STAGE SELECTION */}
-                <div className="flex gap-2 sm:gap-4 mb-6 flex-wrap">
-                    <Button variant={stage === "Drying" ? "default" : "outline"} onClick={() => setStage("Drying")} className="flex-1 sm:flex-none">Drying Stage</Button>
-                    <Button variant={stage === "Roasting" ? "default" : "outline"} onClick={() => setStage("Roasting")} className="flex-1 sm:flex-none">Roasting Stage</Button>
-                </div>
-
-                {/* ======================= DRYING LAYOUT ======================= */}
-                {stage === "Drying" && (
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6 mb-6">
-                        <div className="space-y-4 sm:space-y-6">
-                            <Card className="shadow-lg">
-                                <CardHeader className="bg-gradient-to-r from-blue-500 to-cyan-500 text-white">
-                                    <CardTitle className="flex items-center gap-2 text-lg sm:text-xl">
-                                        <Thermometer size={20} />
-                                        <span>Drying Environment (Left & Right)</span>
-                                    </CardTitle>
-                                </CardHeader>
-                                <CardContent className="pt-4 sm:pt-6 space-y-4">
-                                    {/* LEFT SENSOR */}
-                                    <div className="bg-blue-50 p-3 sm:p-4 rounded-lg border border-blue-200">
-                                        <h3 className="font-semibold text-sm sm:text-base text-blue-900 mb-2">Sensor 1 (Left Side)</h3>
-                                        <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 text-sm sm:text-base">
-                                            <div className="flex items-center gap-2"><Thermometer size={16} className="text-red-500" /> {liveData.sensorLeft.temp.toFixed(1)}°C</div>
-                                            <div className="flex items-center gap-2"><Droplets size={16} className="text-blue-500" /> {liveData.sensorLeft.humi.toFixed(1)}%</div>
-                                        </div>
-                                    </div>
-                                    {/* RIGHT SENSOR */}
-                                    <div className="bg-green-50 p-3 sm:p-4 rounded-lg border border-green-200">
-                                        <h3 className="font-semibold text-sm sm:text-base text-green-900 mb-2">Sensor 2 (Right Side)</h3>
-                                        <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 text-sm sm:text-base">
-                                            <div className="flex items-center gap-2"><Thermometer size={16} className="text-red-500" /> {liveData.sensorRight.temp.toFixed(1)}°C</div>
-                                            <div className="flex items-center gap-2"><Droplets size={16} className="text-blue-500" /> {liveData.sensorRight.humi.toFixed(1)}%</div>
-                                        </div>
-                                    </div>
-                                </CardContent>
-                            </Card>
-
-                            {/* WEIGHT CARD */}
-                            <Card className="shadow-lg">
-                                <CardHeader className="bg-gradient-to-r from-orange-500 to-red-500 text-white">
-                                    <CardTitle className="flex items-center gap-2 text-lg sm:text-xl">
-                                        <Scale size={20} /> Real-Time Weight
-                                    </CardTitle>
-                                </CardHeader>
-                                <CardContent className="pt-4 sm:pt-6 flex flex-col items-center justify-center">
-                                    <p className="text-xs sm:text-sm text-gray-600 mb-2">Current Mass (Water Loss Tracker)</p>
-                                    <div className="text-4xl sm:text-6xl font-bold text-orange-600">
-                                        {formatWeight(liveData.drying.weight)}
-                                    </div>
-                                    <p className="text-xs sm:text-sm text-gray-500 mt-2">
-                                        Calculated Moisture: {liveData.drying.moisture.toFixed(1)}%
-                                    </p>
-                                </CardContent>
-                            </Card>
-                        </div>
-
-                        {/* DRYING GRAPH */}
+            {/* DRYING LAYOUT */}
+            {stage === "Drying" && (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6 mb-6">
+                    <div className="space-y-4 sm:space-y-6">
                         <Card className="shadow-lg">
-                            <CardHeader className="bg-gradient-to-r from-green-500 to-emerald-500 text-white"><CardTitle>Drying Trend</CardTitle></CardHeader>
-                            <CardContent className="pt-4 sm:pt-6">
-                                <ResponsiveContainer width="100%" height={300}>
-                                    <LineChart data={dryingGraphData}>
-                                        <CartesianGrid strokeDasharray="3 3" />
-                                        <XAxis dataKey="timestamp" tickFormatter={formatTimeLabel} tick={{ fontSize: 12 }} />
-                                        <YAxis yAxisId="left" tick={{ fontSize: 12 }} />
-                                        <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 12 }} />
-                                        <Tooltip labelFormatter={formatTimeLabel} />
-                                        <Legend wrapperStyle={{ paddingTop: '10px' }} />
-                                        <Line yAxisId="left" type="monotone" dataKey="weight" stroke="#8b5cf6" name="Weight (kg)" dot={false} />
-                                        <Line yAxisId="right" type="monotone" dataKey="humidity" stroke="#ec4899" name="Humidity (%)" dot={false} />
-                                        <Line yAxisId="right" type="monotone" dataKey="temperature" stroke="#f59e0b" name="Temp (°C)" strokeDasharray="5 5" dot={false} />
-                                    </LineChart>
-                                </ResponsiveContainer>
-                            </CardContent>
-                        </Card>
-                    </div>
-                )}
-
-                {/* ======================= ROASTING DISPLAY ======================= */}
-                {stage === "Roasting" && (
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6 mb-6">
-                        <Card className="shadow-lg">
-                            <CardHeader className="bg-gradient-to-r from-red-600 to-orange-600 text-white">
-                                <CardTitle className="flex items-center gap-2 text-lg sm:text-xl"><Flame size={20} /> Roasting Data</CardTitle>
+                            <CardHeader className="bg-gradient-to-r from-blue-500 to-cyan-500 text-white">
+                                <CardTitle className="flex items-center gap-2 text-lg sm:text-xl">
+                                    <Thermometer size={20} />
+                                    <span>Drying Environment (Left & Right)</span>
+                                </CardTitle>
                             </CardHeader>
-                            <CardContent className="pt-4 sm:pt-6 flex flex-col items-center justify-center min-h-[300px]">
-                                <p className="text-xs sm:text-sm text-gray-600 mb-2">Current Temperature</p>
-                                <div className="text-4xl sm:text-6xl font-bold text-red-600">{liveData.roaster.temp}°C</div>
-                                <p className="text-xs sm:text-sm text-gray-500 mt-4 text-center">*Optimal: {thresholds.roast_min_temp}°C (First Crack) – {thresholds.roast_max_temp}°C (Medium-Dark)</p>
+                            <CardContent className="pt-4 sm:pt-6 space-y-4">
+                                <div className="bg-blue-50 p-3 sm:p-4 rounded-lg border border-blue-200">
+                                    <h3 className="font-semibold text-sm sm:text-base text-blue-900 mb-2">Sensor 1 (Left Side)</h3>
+                                    <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 text-sm sm:text-base">
+                                        <div className="flex items-center gap-2"><Thermometer size={16} className="text-red-500" /> {liveData.sensorLeft.temp.toFixed(1)}°C</div>
+                                        <div className="flex items-center gap-2"><Droplets size={16} className="text-blue-500" /> {liveData.sensorLeft.humi.toFixed(1)}%</div>
+                                    </div>
+                                </div>
+                                <div className="bg-green-50 p-3 sm:p-4 rounded-lg border border-green-200">
+                                    <h3 className="font-semibold text-sm sm:text-base text-green-900 mb-2">Sensor 2 (Right Side)</h3>
+                                    <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 text-sm sm:text-base">
+                                        <div className="flex items-center gap-2"><Thermometer size={16} className="text-red-500" /> {liveData.sensorRight.temp.toFixed(1)}°C</div>
+                                        <div className="flex items-center gap-2"><Droplets size={16} className="text-blue-500" /> {liveData.sensorRight.humi.toFixed(1)}%</div>
+                                    </div>
+                                </div>
                             </CardContent>
                         </Card>
+
                         <Card className="shadow-lg">
-                            <CardHeader className="bg-gradient-to-r from-red-500 to-pink-500 text-white"><CardTitle>Roasting Curve</CardTitle></CardHeader>
-                            <CardContent className="pt-4 sm:pt-6">
-                                <ResponsiveContainer width="100%" height={300}>
-                                    <LineChart data={roastingGraphData}>
-                                        <CartesianGrid strokeDasharray="3 3" />
-                                        <XAxis dataKey="timestamp" tickFormatter={formatTimeLabel} tick={{ fontSize: 12 }} />
-                                        <YAxis tick={{ fontSize: 12 }} />
-                                        <Tooltip labelFormatter={formatTimeLabel} />
-                                        <Legend wrapperStyle={{ paddingTop: '10px' }} />
-                                        <Line type="monotone" dataKey="temperature" stroke="#dc2626" name="Temp (°C)" strokeWidth={2} dot={false} />
-                                    </LineChart>
-                                </ResponsiveContainer>
+                            <CardHeader className="bg-gradient-to-r from-orange-500 to-red-500 text-white">
+                                <CardTitle className="flex items-center gap-2 text-lg sm:text-xl">
+                                    <Scale size={20} /> Real-Time Weight
+                                </CardTitle>
+                            </CardHeader>
+                            <CardContent className="pt-4 sm:pt-6 flex flex-col items-center justify-center">
+                                <p className="text-xs sm:text-sm text-gray-600 mb-2">Current Mass (Water Loss Tracker)</p>
+                                <div className="text-4xl sm:text-6xl font-bold text-orange-600">
+                                    {formatWeight(liveData.drying.weight)}
+                                </div>
+                                <p className="text-xs sm:text-sm text-gray-500 mt-2">
+                                    Calculated Moisture: {liveData.drying.moisture.toFixed(1)}%
+                                </p>
                             </CardContent>
                         </Card>
                     </div>
-                )}
-            </>
 
+                    <Card className="shadow-lg">
+                        <CardHeader className="bg-gradient-to-r from-green-500 to-emerald-500 text-white"><CardTitle>Drying Trend</CardTitle></CardHeader>
+                        <CardContent className="pt-4 sm:pt-6">
+                            <ResponsiveContainer width="100%" height={300}>
+                                <LineChart data={dryingGraphData}>
+                                    <CartesianGrid strokeDasharray="3 3" />
+                                    <XAxis dataKey="timestamp" tickFormatter={formatTimeLabel} tick={{ fontSize: 12 }} />
+                                    <YAxis yAxisId="left" tick={{ fontSize: 12 }} />
+                                    <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 12 }} />
+                                    <Tooltip labelFormatter={formatTimeLabel} />
+                                    <Legend wrapperStyle={{ paddingTop: '10px' }} />
+                                    <Line yAxisId="left" type="monotone" dataKey="weight" stroke="#8b5cf6" name="Weight (kg)" dot={false} />
+                                    <Line yAxisId="right" type="monotone" dataKey="humidity" stroke="#ec4899" name="Humidity (%)" dot={false} />
+                                    <Line yAxisId="right" type="monotone" dataKey="temperature" stroke="#f59e0b" name="Temp (°C)" strokeDasharray="5 5" dot={false} />
+                                </LineChart>
+                            </ResponsiveContainer>
+                        </CardContent>
+                    </Card>
+                </div>
+            )}
 
-            {/* ======================= AI ANALYSIS CARD ======================= */}
+            {/* ROASTING LAYOUT */}
+            {stage === "Roasting" && (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6 mb-6">
+                    <Card className="shadow-lg">
+                        <CardHeader className="bg-gradient-to-r from-red-600 to-orange-600 text-white">
+                            <CardTitle className="flex items-center gap-2 text-lg sm:text-xl"><Flame size={20} /> Roasting Data</CardTitle>
+                        </CardHeader>
+                        <CardContent className="pt-4 sm:pt-6 flex flex-col items-center justify-center min-h-[300px]">
+                            <p className="text-xs sm:text-sm text-gray-600 mb-2">Current Temperature</p>
+                            <div className="text-4xl sm:text-6xl font-bold text-red-600">{liveData.roaster.temp}°C</div>
+                            <p className="text-xs sm:text-sm text-gray-500 mt-4 text-center">*Optimal: {thresholds.roast_min_temp}°C (First Crack) – {thresholds.roast_max_temp}°C (Medium-Dark)</p>
+                        </CardContent>
+                    </Card>
+                    <Card className="shadow-lg">
+                        <CardHeader className="bg-gradient-to-r from-red-500 to-pink-500 text-white"><CardTitle>Roasting Curve</CardTitle></CardHeader>
+                        <CardContent className="pt-4 sm:pt-6">
+                            <ResponsiveContainer width="100%" height={300}>
+                                <LineChart data={roastingGraphData}>
+                                    <CartesianGrid strokeDasharray="3 3" />
+                                    <XAxis dataKey="timestamp" tickFormatter={formatTimeLabel} tick={{ fontSize: 12 }} />
+                                    <YAxis tick={{ fontSize: 12 }} />
+                                    <Tooltip labelFormatter={formatTimeLabel} />
+                                    <Legend wrapperStyle={{ paddingTop: '10px' }} />
+                                    <Line type="monotone" dataKey="temperature" stroke="#dc2626" name="Temp (°C)" strokeWidth={2} dot={false} />
+                                </LineChart>
+                            </ResponsiveContainer>
+                        </CardContent>
+                    </Card>
+                </div>
+            )}
+
+            {/* AI ANALYSIS CARD */}
             <Card className="shadow-lg mt-6 bg-white">
                 <CardHeader className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white">
                     <CardTitle className="flex items-center gap-2 text-lg sm:text-xl">
