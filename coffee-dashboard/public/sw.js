@@ -1,21 +1,19 @@
-const CACHE_NAME = 'coffee-dashboard-v2';
-const STATIC_CACHE = 'coffee-static-v2';
+const CACHE_NAME = 'coffee-dashboard-v3';
+const STATIC_CACHE = 'coffee-static-v3';
 
 // Assets to cache for offline use
 const STATIC_ASSETS = [
-  '/',
-  '/index.html',
   '/manifest.json',
 ];
 
-// Listen for skip waiting message
+// Listen for skip waiting message (only triggered by update banner)
 self.addEventListener('message', (event) => {
   if (event.data?.type === 'SKIP_WAITING') {
     self.skipWaiting();
   }
 });
 
-// Install event - cache static assets
+// Install event - cache only manifest (NOT index.html)
 self.addEventListener('install', (event) => {
   console.log('[SW] Installing service worker...');
   event.waitUntil(
@@ -24,7 +22,7 @@ self.addEventListener('install', (event) => {
       return cache.addAll(STATIC_ASSETS);
     })
   );
-  self.skipWaiting();
+  // DO NOT call self.skipWaiting() here
 });
 
 // Activate event - clean up old caches
@@ -45,7 +43,7 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
-// Fetch event - serve from cache, fallback to network
+// Fetch event
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
@@ -53,7 +51,7 @@ self.addEventListener('fetch', (event) => {
   // Skip non-GET requests
   if (request.method !== 'GET') return;
 
-  // Skip Firebase, weather API, and other external requests (always use network)
+  // Skip external APIs - always use network
   if (
     url.hostname.includes('firebase') ||
     url.hostname.includes('firebaseio') ||
@@ -61,45 +59,57 @@ self.addEventListener('fetch', (event) => {
     url.hostname.includes('googleapis') ||
     url.hostname.includes('gstatic')
   ) {
-    return; // Let browser handle these normally
+    return;
   }
 
-  // For app shell (HTML/JS/CSS assets) - Cache First, fallback to network
-  event.respondWith(
-    caches.match(request).then((cachedResponse) => {
-      if (cachedResponse) {
-        // Serve from cache, update cache in background
-        const fetchPromise = fetch(request).then((networkResponse) => {
+  // NETWORK FIRST for HTML (navigation requests)
+  // This ensures fresh index.html is always loaded
+  if (request.mode === 'navigate' || url.pathname === '/' || url.pathname.endsWith('.html')) {
+    event.respondWith(
+      fetch(request)
+        .then((networkResponse) => {
           if (networkResponse && networkResponse.status === 200) {
-            const responseClone = networkResponse.clone();
-            caches.open(CACHE_NAME).then((cache) => {
-              cache.put(request, responseClone);
-            });
+            const clone = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
           }
           return networkResponse;
-        }).catch(() => {
-          // Network failed, cache already returned
-        });
-        return cachedResponse;
-      }
+        })
+        .catch(() => {
+          // Offline fallback
+          return caches.match('/index.html') || caches.match('/');
+        })
+    );
+    return;
+  }
 
-      // Not in cache — fetch from network and cache it
-      return fetch(request).then((networkResponse) => {
-        if (!networkResponse || networkResponse.status !== 200 || networkResponse.type === 'opaque') {
+  // CACHE FIRST for JS/CSS/images (hashed filenames - safe to cache aggressively)
+  if (
+    url.pathname.startsWith('/assets/') ||
+    url.pathname.endsWith('.png') ||
+    url.pathname.endsWith('.svg') ||
+    url.pathname.endsWith('.ico') ||
+    url.pathname.endsWith('.woff2') ||
+    url.pathname.endsWith('.woff')
+  ) {
+    event.respondWith(
+      caches.match(request).then((cachedResponse) => {
+        if (cachedResponse) return cachedResponse;
+
+        return fetch(request).then((networkResponse) => {
+          if (networkResponse && networkResponse.status === 200) {
+            const clone = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
+          }
           return networkResponse;
-        }
-        const responseClone = networkResponse.clone();
-        caches.open(CACHE_NAME).then((cache) => {
-          cache.put(request, responseClone);
         });
-        return networkResponse;
-      }).catch(() => {
-        // Offline fallback for navigation requests
-        if (request.mode === 'navigate') {
-          return caches.match('/index.html');
-        }
-      });
-    })
+      })
+    );
+    return;
+  }
+
+  // Default: Network first for everything else
+  event.respondWith(
+    fetch(request).catch(() => caches.match(request))
   );
 });
 

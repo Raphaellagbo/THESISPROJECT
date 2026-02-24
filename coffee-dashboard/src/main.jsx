@@ -10,7 +10,7 @@ createRoot(document.getElementById('root')).render(
 )
 
 
-// PWA Service Worker Registration — with Auto-Update Support
+// PWA Service Worker Registration — with Update Banner Support
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
@@ -19,26 +19,39 @@ if ('serviceWorker' in navigator) {
       .then((registration) => {
         console.log('[PWA] Service Worker registered:', registration.scope);
 
-        // Listen for a NEW service worker being installed 
+        const dispatchUpdateEvent = (newWorker) => {
+          console.log('[PWA] New version available — showing update banner...');
+          // Dispatch event so the dashboard can show the update banner
+          window.dispatchEvent(
+            new CustomEvent('pwa-update-available', { detail: { newWorker } })
+          );
+        };
+
+        // Case 1: New SW found after page already loaded
         registration.addEventListener('updatefound', () => {
           const newWorker = registration.installing;
           if (!newWorker) return;
 
           newWorker.addEventListener('statechange', () => {
-            // New SW is installed and ready, but old SW is still controlling
+            // New SW installed and waiting — old SW still controlling
             if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-              console.log('[PWA] New version available — triggering update...');
-
-              // Tell the new SW to skip waiting and take control immediately
-              newWorker.postMessage({ type: 'SKIP_WAITING' });
+              dispatchUpdateEvent(newWorker);
             }
           });
         });
 
-        // When the new SW takes control, reload the page 
-        // This fires after skipWaiting() activates the new SW
+        // Case 2: SW already waiting when page loaded (e.g. tab was open during deploy)
+        if (registration.waiting && navigator.serviceWorker.controller) {
+          dispatchUpdateEvent(registration.waiting);
+        }
+
+        // When the new SW takes control, reload for fresh version
+        // This only fires AFTER user clicks "Refresh" in the banner
+        let reloading = false;
         navigator.serviceWorker.addEventListener('controllerchange', () => {
-          console.log('[PWA] New SW now controlling — reloading page for fresh version.');
+          if (reloading) return;
+          reloading = true;
+          console.log('[PWA] New SW now controlling — reloading page.');
           window.location.reload();
         });
 
