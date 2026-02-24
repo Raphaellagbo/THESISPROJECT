@@ -207,7 +207,12 @@ export default function CoffeeMonitoringDashboard() {
     const [weatherData, setWeatherData] = useState(null);
     const [weatherLoading, setWeatherLoading] = useState(false);
     const [weatherError, setWeatherError] = useState(null);
-    const [selectedLocation, setSelectedLocation] = useState(null);
+    const [selectedLocation, setSelectedLocation] = useState(() => {
+        try {
+            const saved = localStorage.getItem('coffee_selected_location');
+            return saved ? JSON.parse(saved) : null;
+        } catch { return null; }
+    });
 
     // --- NOTIFICATION & AUTO-REFRESH STATE ---
     const [notificationsEnabled, setNotificationsEnabled] = useState(false);
@@ -223,6 +228,34 @@ export default function CoffeeMonitoringDashboard() {
     // --- SETTINGS LOADED FLAG (prevents overwriting Firebase before data loads) ---
     const [settingsLoaded, setSettingsLoaded] = useState(false);
 
+    // --- PWA UPDATE BANNER STATE ---
+    const [updateAvailable, setUpdateAvailable] = useState(false);
+    const pendingWorkerRef = React.useRef(null);
+
+    // ==========================================================
+    // PWA: LISTEN FOR UPDATE-AVAILABLE EVENT FROM main.jsx
+    // ==========================================================
+    useEffect(() => {
+        const handleUpdateAvailable = (e) => {
+            pendingWorkerRef.current = e.detail?.newWorker ?? null;
+            setUpdateAvailable(true);
+        };
+        window.addEventListener('pwa-update-available', handleUpdateAvailable);
+        return () => window.removeEventListener('pwa-update-available', handleUpdateAvailable);
+    }, []);
+
+    const applyUpdate = () => {
+        if (pendingWorkerRef.current) {
+            pendingWorkerRef.current.postMessage({ type: 'SKIP_WAITING' });
+        }
+        // Reload once the new SW takes control
+        navigator.serviceWorker?.addEventListener('controllerchange', () => {
+            window.location.reload();
+        }, { once: true });
+        // Fallback reload
+        setTimeout(() => window.location.reload(), 1000);
+    };
+
     // ==========================================================
     // FIREBASE: LOAD SETTINGS ON STARTUP
     // ==========================================================
@@ -235,7 +268,6 @@ export default function CoffeeMonitoringDashboard() {
                 setShowWeather(data.showWeather ?? false);
                 setAutoRefresh(data.autoRefresh ?? false);
             }
-            // Mark as loaded whether data exists or not
             setSettingsLoaded(true);
         });
         return () => unsubscribe();
@@ -243,7 +275,6 @@ export default function CoffeeMonitoringDashboard() {
 
     // ==========================================================
     // FIREBASE: SAVE SETTINGS WHEN TOGGLED
-    // (guarded by settingsLoaded to avoid overwriting on mount)
     // ==========================================================
     useEffect(() => {
         if (!settingsLoaded) return;
@@ -283,6 +314,7 @@ export default function CoffeeMonitoringDashboard() {
         setWeatherError(null);
         setWeatherData(null);
         setSelectedLocation(location);
+        try { localStorage.setItem('coffee_selected_location', JSON.stringify(location)); } catch { }
         try {
             const url = `https://api.open-meteo.com/v1/forecast?latitude=${location.lat}&longitude=${location.lon}&current=temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,weather_code&hourly=temperature_2m,relative_humidity_2m&timezone=Asia%2FManila&forecast_days=1`;
             const res = await fetch(url);
@@ -296,6 +328,14 @@ export default function CoffeeMonitoringDashboard() {
             setWeatherLoading(false);
         }
     };
+
+    // Auto-fetch saved location on mount (restores weather after refresh)
+    useEffect(() => {
+        if (selectedLocation) {
+            fetchWeather(selectedLocation);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     const getWeatherIcon = (code) => {
         if (code === 0) return <Sun size={32} className="text-yellow-400" />;
@@ -672,6 +712,34 @@ export default function CoffeeMonitoringDashboard() {
                     </div>
                 ))}
             </div>
+
+            {/* PWA UPDATE BANNER */}
+            {updateAvailable && (
+                <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 w-[calc(100%-2rem)] max-w-sm">
+                    <div className="flex items-center gap-3 bg-gray-900 text-white rounded-xl shadow-2xl px-4 py-3 border border-white/10">
+                        <span className="text-xl select-none">🆕</span>
+                        <div className="flex-1 min-w-0">
+                            <p className="text-sm font-semibold leading-tight">Update available</p>
+                            <p className="text-xs text-gray-400 leading-tight">A new version is ready to install</p>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                            <button
+                                onClick={applyUpdate}
+                                className="bg-amber-500 hover:bg-amber-400 active:bg-amber-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-colors"
+                            >
+                                Refresh
+                            </button>
+                            <button
+                                onClick={() => setUpdateAvailable(false)}
+                                className="text-gray-400 hover:text-white transition-colors p-1"
+                                title="Dismiss"
+                            >
+                                <X size={16} />
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* HEADER */}
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
