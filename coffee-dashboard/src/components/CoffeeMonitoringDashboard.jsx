@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
     AlertTriangle,
     Thermometer,
@@ -20,7 +20,10 @@ import {
     Loader2,
     Bell,
     BellOff,
-    BellRing
+    BellRing,
+    CalendarDays,
+    Clock,
+    TrendingDown
 } from "lucide-react";
 import {
     LineChart,
@@ -173,6 +176,43 @@ const formatWeight = (weightInKg) => {
     return `${weightInKg.toFixed(2)} kg`;
 };
 
+// Helper to calculate estimated completion time
+const estimateCompletionTime = (historyData, targetMoisture) => {
+    if (!historyData || historyData.length < 10) return null; // Need enough data points
+
+    // Get recent data window (last 60 points or all if less)
+    const window = historyData.slice(-60);
+    const first = window[0];
+    const last = window[window.length - 1];
+
+    if (!first || !last) return null;
+
+    const timeElapsedHours = (new Date(last.timestamp) - new Date(first.timestamp)) / 3600000;
+    const moistureChange = first.moisture - last.moisture;
+
+    // If moisture isn't dropping or time is 0, can't predict
+    if (timeElapsedHours <= 0.05 || moistureChange <= 0) return null;
+
+    const ratePerHour = moistureChange / timeElapsedHours;
+    const remainingMoisture = last.moisture - targetMoisture;
+
+    if (remainingMoisture <= 0) return "Ready Now";
+
+    const hoursLeft = remainingMoisture / ratePerHour;
+
+    if (hoursLeft > 240) return "> 10 Days"; // Outlier
+
+    const now = new Date();
+    const completionDate = new Date(now.getTime() + hoursLeft * 3600000);
+
+    // If less than 24 hours, show hours, otherwise show date
+    if (hoursLeft < 24) {
+        return `${hoursLeft.toFixed(1)} hrs`;
+    } else {
+        return `${(hoursLeft / 24).toFixed(1)} days`;
+    }
+};
+
 export default function CoffeeMonitoringDashboard() {
     const [stage, setStage] = useState("Drying");
     const [showSettings, setShowSettings] = useState(false);
@@ -181,7 +221,7 @@ export default function CoffeeMonitoringDashboard() {
     const [thresholds, setThresholds] = useState({
         dry_max_temp: 40.0,
         dry_max_humi: 65.0,
-        dry_target_weight: 12.0,
+        dry_target_weight: 12.0, // This is actually Target Moisture % in the logic
         roast_max_temp: 224.0,
         roast_min_temp: 196.0
     });
@@ -201,10 +241,12 @@ export default function CoffeeMonitoringDashboard() {
 
     const [dryingGraphData, setDryingGraphData] = useState([]);
     const [roastingGraphData, setRoastingGraphData] = useState([]);
+    const [dryingEstimation, setDryingEstimation] = useState(null);
 
     // --- WEATHER STATE ---
     const [showWeather, setShowWeather] = useState(false);
     const [weatherData, setWeatherData] = useState(null);
+    const [dailyForecast, setDailyForecast] = useState(null); // Added for rain prediction
     const [weatherLoading, setWeatherLoading] = useState(false);
     const [weatherError, setWeatherError] = useState(null);
     const [selectedLocation, setSelectedLocation] = useState(() => {
@@ -222,18 +264,18 @@ export default function CoffeeMonitoringDashboard() {
     const [toasts, setToasts] = useState([]);
     const [autoRefresh, setAutoRefresh] = useState(false);
     const [lastCheckedWeather, setLastCheckedWeather] = useState(null);
-    const weatherRefreshRef = React.useRef(null);
-    const prevAiAlertRef = React.useRef({ message: "", type: "" });
+    const weatherRefreshRef = useRef(null);
+    const prevAiAlertRef = useRef({ message: "", type: "" });
 
-    // --- SETTINGS LOADED FLAG (prevents overwriting Firebase before data loads) ---
+    // --- SETTINGS LOADED FLAG ---
     const [settingsLoaded, setSettingsLoaded] = useState(false);
 
     // --- PWA UPDATE BANNER STATE ---
     const [updateAvailable, setUpdateAvailable] = useState(false);
-    const pendingWorkerRef = React.useRef(null);
+    const pendingWorkerRef = useRef(null);
 
     // ==========================================================
-    // PWA: LISTEN FOR UPDATE-AVAILABLE EVENT FROM main.jsx
+    // PWA UPDATE LOGIC
     // ==========================================================
     useEffect(() => {
         const handleUpdateAvailable = (e) => {
@@ -248,16 +290,14 @@ export default function CoffeeMonitoringDashboard() {
         if (pendingWorkerRef.current) {
             pendingWorkerRef.current.postMessage({ type: 'SKIP_WAITING' });
         }
-        // Reload once the new SW takes control
         navigator.serviceWorker?.addEventListener('controllerchange', () => {
             window.location.reload();
         }, { once: true });
-        // Fallback reload
         setTimeout(() => window.location.reload(), 1000);
     };
 
     // ==========================================================
-    // FIREBASE: LOAD SETTINGS ON STARTUP
+    // FIREBASE SETTINGS
     // ==========================================================
     useEffect(() => {
         const settingsRef = ref(database, '/settings');
@@ -273,9 +313,6 @@ export default function CoffeeMonitoringDashboard() {
         return () => unsubscribe();
     }, []);
 
-    // ==========================================================
-    // FIREBASE: SAVE SETTINGS WHEN TOGGLED
-    // ==========================================================
     useEffect(() => {
         if (!settingsLoaded) return;
         set(ref(database, '/settings/notificationsEnabled'), notificationsEnabled);
@@ -309,18 +346,27 @@ export default function CoffeeMonitoringDashboard() {
         { name: "Cebu City", lat: 10.3157, lon: 123.8854 },
     ];
 
+    // ==========================================================
+    // WEATHER & PREDICTION FETCH
+    // ==========================================================
     const fetchWeather = async (location) => {
         setWeatherLoading(true);
         setWeatherError(null);
         setWeatherData(null);
+        setDailyForecast(null);
         setSelectedLocation(location);
         try { localStorage.setItem('coffee_selected_location', JSON.stringify(location)); } catch { }
         try {
-            const url = `https://api.open-meteo.com/v1/forecast?latitude=${location.lat}&longitude=${location.lon}&current=temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,weather_code&hourly=temperature_2m,relative_humidity_2m&timezone=Asia%2FManila&forecast_days=1`;
+            // UPDATED URL: Added daily parameters for rain prediction and 7-day forecast
+            const url = `https://api.open-meteo.com/v1/forecast?latitude=${location.lat}&longitude=${location.lon}&current=temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,weather_code&hourly=temperature_2m,relative_humidity_2m&daily=weather_code,precipitation_sum,precipitation_probability_max&timezone=Asia%2FManila&forecast_days=7`;
+
             const res = await fetch(url);
             if (!res.ok) throw new Error("Failed to fetch weather");
             const json = await res.json();
+
             setWeatherData(json);
+            setDailyForecast(json.daily); // Store daily forecast data
+
             evaluateWeatherAlerts(json, location);
         } catch (err) {
             setWeatherError("Could not load weather data. Check your connection.");
@@ -329,7 +375,6 @@ export default function CoffeeMonitoringDashboard() {
         }
     };
 
-    // Auto-fetch saved location on mount (restores weather after refresh)
     useEffect(() => {
         if (selectedLocation) {
             fetchWeather(selectedLocation);
@@ -369,7 +414,6 @@ export default function CoffeeMonitoringDashboard() {
     };
     const dismissToast = (id) => setToasts(prev => prev.filter(t => t.id !== id));
 
-    // --- REQUEST BROWSER NOTIFICATION PERMISSION ---
     const requestNotifPermission = async () => {
         if (typeof Notification === "undefined") {
             addToast("Browser notifications not supported.", "warning");
@@ -400,26 +444,20 @@ export default function CoffeeMonitoringDashboard() {
         }
     };
 
-    // --- SEND BROWSER + IN-APP NOTIFICATION ---
     const sendWeatherAlert = (title, body, type = "warning") => {
         addToast(`${title}: ${body}`, type);
         if (notificationsEnabled && notifPermission === "granted") {
-            try {
-                new Notification(title, { body, tag: "coffee-weather-alert" });
-            } catch (e) { }
+            try { new Notification(title, { body, tag: "coffee-weather-alert" }); } catch (e) { }
         }
     };
 
     const sendSensorAlert = (title, body, type = "warning", tag = "coffee-sensor-alert") => {
         addToast(`${title}: ${body}`, type);
         if (notificationsEnabled && notifPermission === "granted") {
-            try {
-                new Notification(title, { body, tag });
-            } catch (e) { }
+            try { new Notification(title, { body, tag }); } catch (e) { }
         }
     };
 
-    // --- EVALUATE WEATHER ALERTS ---
     const evaluateWeatherAlerts = (json, location) => {
         const c = json.current;
         const humidity = c.relative_humidity_2m;
@@ -437,24 +475,18 @@ export default function CoffeeMonitoringDashboard() {
         setLastCheckedWeather(new Date().toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit" }));
     };
 
-    // --- AUTO-REFRESH EFFECT ---
     useEffect(() => {
         if (autoRefresh && selectedLocation) {
-            weatherRefreshRef.current = setInterval(async () => {
-                try {
-                    const url = `https://api.open-meteo.com/v1/forecast?latitude=${selectedLocation.lat}&longitude=${selectedLocation.lon}&current=temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,weather_code&timezone=Asia%2FManila&forecast_days=1`;
-                    const res = await fetch(url);
-                    if (!res.ok) return;
-                    const json = await res.json();
-                    setWeatherData(json);
-                    evaluateWeatherAlerts(json, selectedLocation);
-                } catch (e) { }
+            weatherRefreshRef.current = setInterval(() => {
+                fetchWeather(selectedLocation); // Reuse fetchWeather to get latest data
             }, 10 * 60 * 1000);
         }
         return () => clearInterval(weatherRefreshRef.current);
     }, [autoRefresh, selectedLocation, notificationsEnabled]);
 
-    // --- FIREBASE SENSOR DATA LISTENER ---
+    // ==========================================================
+    // FIREBASE SENSOR DATA LISTENER & DRYING PREDICTION
+    // ==========================================================
     useEffect(() => {
         const sensorsRef = ref(database, '/');
         const unsubscribe = onValue(sensorsRef, (snapshot) => {
@@ -487,7 +519,20 @@ export default function CoffeeMonitoringDashboard() {
                 });
 
                 const timestamp = new Date().toISOString();
-                setDryingGraphData(prev => [...prev, { timestamp, weight: dryWeight, humidity: sLeftHumi, temperature: sLeftTemp }].slice(-20));
+
+                // UPDATED: Added 'moisture' to graph data history for prediction
+                setDryingGraphData(prev => {
+                    const newData = [...prev, { timestamp, weight: dryWeight, moisture: dryMoisture, humidity: sLeftHumi, temperature: sLeftTemp }];
+                    // Keep larger buffer (100 points) for better trend calculation
+                    const trimmed = newData.slice(-100);
+
+                    // Run Estimation
+                    const est = estimateCompletionTime(trimmed, thresholds.dry_target_weight);
+                    setDryingEstimation(est);
+
+                    return trimmed;
+                });
+
                 if (roastTemp > 0) {
                     setRoastingGraphData(prev => [...prev, { timestamp, temperature: roastTemp }].slice(-20));
                 }
@@ -533,7 +578,7 @@ export default function CoffeeMonitoringDashboard() {
             }
         });
         return () => unsubscribe();
-    }, [notificationsEnabled, notifPermission]);
+    }, [notificationsEnabled, notifPermission, thresholds.dry_target_weight]); // Added thresholds dependency
 
     const formatTimeLabel = (iso) => {
         try {
@@ -871,51 +916,82 @@ export default function CoffeeMonitoringDashboard() {
                             const impact = getDryingImpact(humidity, temp);
 
                             return (
-                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                                    <div className="sm:col-span-1 bg-gradient-to-br from-sky-400 to-blue-500 text-white rounded-xl p-4 flex flex-col items-center justify-center text-center shadow">
-                                        {getWeatherIcon(code)}
-                                        <p className="text-3xl font-bold mt-2">{temp}°C</p>
-                                        <p className="text-sm font-medium opacity-90">{getWeatherLabel(code)}</p>
-                                        <p className="text-xs opacity-75 mt-1 flex items-center gap-1"><MapPin size={11} />{selectedLocation.name}</p>
+                                <div className="space-y-4">
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                                        <div className="sm:col-span-1 bg-gradient-to-br from-sky-400 to-blue-500 text-white rounded-xl p-4 flex flex-col items-center justify-center text-center shadow">
+                                            {getWeatherIcon(code)}
+                                            <p className="text-3xl font-bold mt-2">{temp}°C</p>
+                                            <p className="text-sm font-medium opacity-90">{getWeatherLabel(code)}</p>
+                                            <p className="text-xs opacity-75 mt-1 flex items-center gap-1"><MapPin size={11} />{selectedLocation.name}</p>
+                                        </div>
+
+                                        <div className="sm:col-span-1 grid grid-cols-2 gap-2 sm:gap-3">
+                                            <div className="bg-white rounded-xl p-2 sm:p-3 shadow-sm border border-sky-100 flex flex-col items-center justify-center text-center">
+                                                <Droplets size={18} className="text-blue-400 mb-1" />
+                                                <p className="text-lg sm:text-xl font-bold text-gray-800">{humidity}%</p>
+                                                <p className="text-xs text-gray-500">Humidity</p>
+                                            </div>
+                                            <div className="bg-white rounded-xl p-2 sm:p-3 shadow-sm border border-sky-100 flex flex-col items-center justify-center text-center">
+                                                <Wind size={18} className="text-teal-400 mb-1" />
+                                                <p className="text-lg sm:text-xl font-bold text-gray-800">{wind}</p>
+                                                <p className="text-xs text-gray-500">Wind km/h</p>
+                                            </div>
+                                            <div className="bg-white rounded-xl p-2 sm:p-3 shadow-sm border border-sky-100 flex flex-col items-center justify-center text-center">
+                                                <CloudRain size={18} className="text-indigo-400 mb-1" />
+                                                <p className="text-lg sm:text-xl font-bold text-gray-800">{precip} mm</p>
+                                                <p className="text-xs text-gray-500">Precipitation</p>
+                                            </div>
+                                            <div className="bg-white rounded-xl p-2 sm:p-3 shadow-sm border border-sky-100 flex flex-col items-center justify-center text-center">
+                                                <Thermometer size={18} className="text-orange-400 mb-1" />
+                                                <p className="text-lg sm:text-xl font-bold text-gray-800">{temp}°C</p>
+                                                <p className="text-xs text-gray-500">Outdoor Temp</p>
+                                            </div>
+                                        </div>
+
+                                        <div className="sm:col-span-1 bg-white rounded-xl p-3 sm:p-4 shadow-sm border border-sky-100 flex flex-col justify-between">
+                                            <div>
+                                                <p className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2 flex items-center gap-1">
+                                                    <Lightbulb size={13} /> Drying Impact Assessment
+                                                </p>
+                                                <p className={`text-base font-bold ${impact.color}`}>{impact.label}</p>
+                                                <p className="text-xs text-gray-600 mt-2 leading-relaxed">{impact.note}</p>
+                                            </div>
+                                            <div className="mt-3 pt-3 border-t border-gray-100">
+                                                <p className="text-xs text-gray-400">
+                                                    Threshold reference: &gt;65% RH = mold risk · &gt;40°C = fermentation risk
+                                                </p>
+                                            </div>
+                                        </div>
                                     </div>
 
-                                    <div className="sm:col-span-1 grid grid-cols-2 gap-2 sm:gap-3">
-                                        <div className="bg-white rounded-xl p-2 sm:p-3 shadow-sm border border-sky-100 flex flex-col items-center justify-center text-center">
-                                            <Droplets size={18} className="text-blue-400 mb-1" />
-                                            <p className="text-lg sm:text-xl font-bold text-gray-800">{humidity}%</p>
-                                            <p className="text-xs text-gray-500">Humidity</p>
-                                        </div>
-                                        <div className="bg-white rounded-xl p-2 sm:p-3 shadow-sm border border-sky-100 flex flex-col items-center justify-center text-center">
-                                            <Wind size={18} className="text-teal-400 mb-1" />
-                                            <p className="text-lg sm:text-xl font-bold text-gray-800">{wind}</p>
-                                            <p className="text-xs text-gray-500">Wind km/h</p>
-                                        </div>
-                                        <div className="bg-white rounded-xl p-2 sm:p-3 shadow-sm border border-sky-100 flex flex-col items-center justify-center text-center">
-                                            <CloudRain size={18} className="text-indigo-400 mb-1" />
-                                            <p className="text-lg sm:text-xl font-bold text-gray-800">{precip} mm</p>
-                                            <p className="text-xs text-gray-500">Precipitation</p>
-                                        </div>
-                                        <div className="bg-white rounded-xl p-2 sm:p-3 shadow-sm border border-sky-100 flex flex-col items-center justify-center text-center">
-                                            <Thermometer size={18} className="text-orange-400 mb-1" />
-                                            <p className="text-lg sm:text-xl font-bold text-gray-800">{temp}°C</p>
-                                            <p className="text-xs text-gray-500">Outdoor Temp</p>
-                                        </div>
-                                    </div>
+                                    {/* --- 7-DAY RAIN PREDICTION ROW --- */}
+                                    {dailyForecast && (
+                                        <div className="bg-white rounded-xl border border-sky-100 p-4 shadow-sm">
+                                            <h4 className="text-sm font-bold text-gray-700 mb-3 flex items-center gap-2">
+                                                <CalendarDays size={16} className="text-sky-600" /> 7-Day Rain Forecast
+                                            </h4>
+                                            <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
+                                                {dailyForecast.time.map((day, i) => {
+                                                    const precipProb = dailyForecast.precipitation_probability_max[i];
+                                                    const rainSum = dailyForecast.precipitation_sum[i];
+                                                    const date = new Date(day).toLocaleDateString("en-US", { weekday: 'short', day: 'numeric' });
+                                                    const isRainy = rainSum > 1.0 || precipProb > 50;
 
-                                    <div className="sm:col-span-1 bg-white rounded-xl p-3 sm:p-4 shadow-sm border border-sky-100 flex flex-col justify-between">
-                                        <div>
-                                            <p className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2 flex items-center gap-1">
-                                                <Lightbulb size={13} /> Drying Impact Assessment
-                                            </p>
-                                            <p className={`text-base font-bold ${impact.color}`}>{impact.label}</p>
-                                            <p className="text-xs text-gray-600 mt-2 leading-relaxed">{impact.note}</p>
+                                                    return (
+                                                        <div key={day} className={`min-w-[80px] p-2 rounded-lg text-center border text-xs flex flex-col items-center gap-1
+                                                            ${isRainy ? "bg-blue-50 border-blue-200" : "bg-gray-50 border-gray-100"}`}>
+                                                            <span className="font-semibold text-gray-600">{date}</span>
+                                                            {isRainy ? <CloudRain size={18} className="text-blue-500" /> : <Sun size={18} className="text-orange-400" />}
+                                                            <span className={`font-bold ${isRainy ? "text-blue-700" : "text-gray-500"}`}>
+                                                                {rainSum.toFixed(1)}mm
+                                                            </span>
+                                                            <span className="text-[10px] text-gray-400">{precipProb}% Prob</span>
+                                                        </div>
+                                                    )
+                                                })}
+                                            </div>
                                         </div>
-                                        <div className="mt-3 pt-3 border-t border-gray-100">
-                                            <p className="text-xs text-gray-400">
-                                                Threshold reference: &gt;65% RH = mold risk · &gt;40°C = fermentation risk
-                                            </p>
-                                        </div>
-                                    </div>
+                                    )}
                                 </div>
                             );
                         })()}
@@ -968,17 +1044,30 @@ export default function CoffeeMonitoringDashboard() {
                         <Card className="shadow-lg">
                             <CardHeader className="bg-gradient-to-r from-orange-500 to-red-500 text-white">
                                 <CardTitle className="flex items-center gap-2 text-lg sm:text-xl">
-                                    <Scale size={20} /> Real-Time Weight
+                                    <Scale size={20} /> Real-Time Weight & Moisture
                                 </CardTitle>
                             </CardHeader>
-                            <CardContent className="pt-4 sm:pt-6 flex flex-col items-center justify-center">
-                                <p className="text-xs sm:text-sm text-gray-600 mb-2">Current Mass (Water Loss Tracker)</p>
-                                <div className="text-4xl sm:text-6xl font-bold text-orange-600">
-                                    {formatWeight(liveData.drying.weight)}
+                            <CardContent className="pt-4 sm:pt-6">
+                                <div className="flex flex-col items-center justify-center mb-6">
+                                    <p className="text-xs sm:text-sm text-gray-600 mb-2">Current Mass (Water Loss Tracker)</p>
+                                    <div className="text-4xl sm:text-6xl font-bold text-orange-600">
+                                        {formatWeight(liveData.drying.weight)}
+                                    </div>
+                                    <p className="text-sm font-semibold text-gray-600 mt-2">
+                                        Calculated Moisture: <span className="text-orange-600">{liveData.drying.moisture.toFixed(1)}%</span>
+                                    </p>
+                                    <p className="text-xs text-gray-400 mt-1">Target: {thresholds.dry_target_weight}%</p>
                                 </div>
-                                <p className="text-xs sm:text-sm text-gray-500 mt-2">
-                                    Calculated Moisture: {liveData.drying.moisture.toFixed(1)}%
-                                </p>
+
+                                {/* ADDED: ESTIMATED COMPLETION PREDICTION */}
+                                <div className="bg-orange-50 rounded-lg p-3 border border-orange-100 flex items-center justify-between">
+                                    <div className="flex items-center gap-2 text-orange-800 font-medium text-sm">
+                                        <Clock size={16} /> Estimated Time to Finish
+                                    </div>
+                                    <div className="font-bold text-orange-900 text-sm">
+                                        {dryingEstimation || "Calculating..."}
+                                    </div>
+                                </div>
                             </CardContent>
                         </Card>
                     </div>
